@@ -1,0 +1,164 @@
+Installing Certbot
+As prerequisite you will need a domain name that target you haproxy IP. This is obvisouly to verify that the domain name is yours ;-)
+
+Here is a little picture of what will be achieved at the end. HTTPS to haproxy with haproxy providing the LetsEncrypt certificate. Then Haproxy is forwarding traffic to the web server.
+
+letsencrypt.PNG
+
+First thing to do is to install certbot on the haproxy server. This little tool is in charge to emit and renew certificates. I am doing this example on Ubuntu 20.04.
+
+Verify that your snapd service is up to date (snap is the way to install certbot, apt package is not maintaned anymore I guess):
+
+
+COPY
+
+COPY
+sudo snap install core; sudo snap refresh core
+Install certbot:
+
+
+COPY
+
+COPY
+sudo snap install --classic certbot
+The Flow
+You can ask 2 thing from Let'sEncrypt. Request a new certificate or renew and existing one. Wil will first request a new certificate and then automate the renewal process.
+
+To request your new certificate on your HAproxy, you need to make it accessible via http port 80 from the internet. Let'sEncrypt, with the help of certbot, will verify that you own the domain by asking for a token at a specific URL. For example your domain name is foo.mydomain.com, Let'sEncrypt will try to access to foo.mydomain.com/.well-known/acme-challenge... If it access this url successfully, then it will validated the certificate request. Note that it will happen on port 80 as you have no valid certificate yet.
+
+As our haproxy is not a web server, we will use a little trick with certbot. with a magic parameter, certbot will act as a mini-webserver to provide the request page by LetsEncrypt using a specific port (in order not to create conflict with another service using port 80). Let's make a littl haproxy configuration here.
+
+in /etc/haproxy/haproxy.cfg
+
+
+COPY
+
+COPY
+#frontend listening on port 80
+#fowarding http traffic to cerbot in case of path beginning by /.well-known/acme-challenge
+#Otherwise taffic goes to the webapp
+frontend my-web-app-fe
+    bind *:80
+
+    # letsencryp validation path for cert request
+    acl letsencrypt-acl path_beg /.well-known/acme-challenge/
+    use_backend letsencrypt-backend if letsencrypt-acl
+
+    default_backend my-web-app-be
+
+backend letsencrypt-backend
+    server certbot 127.0.0.1:8899
+
+backend my-web-app-be
+    #any config omitted
+You can validate syntax with:
+
+
+COPY
+
+COPY
+ haproxy -c -V -f /etc/haproxy/haproxy.cfg
+Do not forget to reload the config
+
+
+COPY
+
+COPY
+ sudo service haproxy reload
+Request a new certificate
+Use the command below to request your certificate for the first time:4
+
+
+COPY
+
+COPY
+sudo certbot certonly --standalone -d your.domain.com --non-interactive --agree-tos --email your@email.com --http-01-port=8899
+Note the parameter "--http-01-port=8899". This is the same port as our backend "letsencrypt-backend" in th haproxy.cfg. This parameter will make certbot generate a little local webserver running on port 8899 only to provide the validation token to letsencrypt. This is the magic trick i mentionned above.
+
+Now 2 file have been created on /etc/letsencrypt
+
+The full chain: /etc/letsencrypt/live/your.domain.com/fullchain.pem The private key: /etc/letsencrypt/live/your.domain.com/privkey.pem
+
+We will concatenate these 2 files in one .pem fil that will be used in our haproxy config file.
+
+
+COPY
+
+COPY
+cat /etc/letsencrypt/live/your.domain.com/fullchain.pem /etc/letsencrypt/live/your.domain.com/privkey.pem > /etc/ssl/your.domain.com.pem
+To renew the certificate we have to adapt our haproxy config in order to listent on 443 with the correct certficate. Because when we will ask for renewal, letsencrypt will contact our server on https instead of simple http like before.
+
+
+COPY
+
+COPY
+#frontend listening on port 80
+#fowarding http traffic to cerbot in case of path beginning by /.well-known/acme-challenge
+#Otherwise taffic goes to the webapp
+frontend my-web-app-fe
+    bind *:80
+    #We need to listen on 443 for certificate renewal
+    bind *:443 ssl crt /etc/ssl/encryptme.cisel4you.ch.pem
+
+    # letsencryp validation path for cert request
+    acl letsencrypt-acl path_beg /.well-known/acme-challenge/
+    use_backend letsencrypt-backend if letsencrypt-acl
+
+    default_backend my-web-app-be
+
+backend letsencrypt-backend
+    server certbot 127.0.0.1:8899
+Again reload the config
+
+
+COPY
+
+COPY
+sudo service haproxy reload
+Command to renew the certificate:
+
+
+COPY
+
+COPY
+sudo certbot renew
+note that if certificate will expire in more than a month it wont be renewed, except if you add the parameter --force-renewal
+
+
+COPY
+
+COPY
+sudo certbot renew  --force-renewal
+We will have to reconcatenate the fullchain.pem and the private key:
+
+
+COPY
+
+COPY
+cat /etc/letsencrypt/live/your.domain.com/fullchain.pem /etc/letsencrypt/live/your.domain.com/privkey.pem > /etc/ssl/your.domain.com.pem
+You can now create a little script to renew the certificate and concatenate the files in /opt/updatecerts.sh:
+
+
+COPY
+
+COPY
+#!/usr/bin/env bash
+
+# Renew the certificate
+sudo certbot renew #--force-renewal
+
+# Concatenate new cert files
+bash -c "sudo cat /etc/letsencrypt/live/your.domain.com/fullchain.pem /etc/letsencrypt/live/your.domain.com/privkey.pem > /etc/ssl/your.domain.com.pem"
+
+# Reload  HAProxy config file, not sure if needed
+sudo service haproxy reload
+Add it to your crontab (sudo crontab -e)
+
+
+COPY
+
+COPY
+0 1 * * * /opt/updatecerts.sh
+This will try to renew our certificate every day at 1AM.
+
+This is it guys!
